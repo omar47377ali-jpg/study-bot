@@ -1,11 +1,11 @@
 import asyncio
-import base64
 import json
 import logging
 import os
 
 from aiohttp import web
-from anthropic import AsyncAnthropic
+from google import genai
+from google.genai import types
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -20,12 +20,12 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("study-bot")
 
 TOKEN = os.environ["TELEGRAM_TOKEN"]
-MODEL = os.getenv("MODEL", "claude-sonnet-5-5")
+MODEL = os.getenv("MODEL", "gemini-flash-lite-latest")
 NUM_Q = int(os.getenv("NUM_QUESTIONS", "5"))
 PORT = int(os.getenv("PORT", "10000"))
 ALLOWED = {int(x) for x in os.getenv("ALLOWED_IDS", "").split(",") if x.strip()}
 
-client = AsyncAnthropic()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 sessions: dict[int, dict] = {}
 LETTERS = ["A", "B", "C", "D"]
 
@@ -70,56 +70,40 @@ async def on_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(uid):
         return
 
-    blocks = []
+    parts = []
     if m.photo:
         f = await m.photo[-1].get_file()
         data = bytes(await f.download_as_bytearray())
-        blocks.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/jpeg",
-                    "data": base64.b64encode(data).decode(),
-                },
-            }
-        )
+        parts.append(types.Part.from_bytes(data=data, mime_type="image/jpeg"))
     elif m.document and m.document.mime_type == "application/pdf":
         if (m.document.file_size or 0) > 19 * 1024 * 1024:
             await m.reply_text("الملف كبير، ابعته أصغر من 19MB.")
             return
         f = await m.document.get_file()
         data = bytes(await f.download_as_bytearray())
-        blocks.append(
-            {
-                "type": "document",
-                "source": {
-                    "type": "base64",
-                    "media_type": "application/pdf",
-                    "data": base64.b64encode(data).decode(),
-                },
-            }
-        )
+        parts.append(types.Part.from_bytes(data=data, mime_type="application/pdf"))
     elif m.text:
-        blocks.append({"type": "text", "text": m.text})
+        parts.append(types.Part.from_text(text=m.text))
     else:
         await m.reply_text("ابعت صورة أو PDF أو نص.")
         return
 
     if m.caption:
-        blocks.append({"type": "text", "text": m.caption})
-    blocks.append({"type": "text", "text": "اشرح هذا المحتوى وأعطني الأسئلة."})
+        parts.append(types.Part.from_text(text=m.caption))
+    parts.append(types.Part.from_text(text="اشرح هذا المحتوى وأعطني الأسئلة."))
 
     wait = await m.reply_text("⏳ عم أقرأ الصفحة...")
     try:
-        resp = await client.messages.create(
+        resp = await client.aio.models.generate_content(
             model=MODEL,
-            max_tokens=4000,
-            system=SYSTEM,
-            messages=[{"role": "user", "content": blocks}],
+            contents=parts,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM,
+                response_mime_type="application/json",
+                max_output_tokens=8000,
+            ),
         )
-        text = "".join(b.text for b in resp.content if b.type == "text")
-        data = parse_json(text)
+        data = parse_json(resp.text)
     except Exception:
         log.exception("generation failed")
         await wait.edit_text("صار خطأ، جرّب تبعت الصفحة مرة ثانية.")
