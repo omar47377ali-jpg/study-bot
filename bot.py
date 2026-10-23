@@ -27,24 +27,56 @@ ALLOWED = {int(x) for x in os.getenv("ALLOWED_IDS", "").split(",") if x.strip()}
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 sessions: dict[int, dict] = {}
-LETTERS = ["A", "B", "C", "D"]
+
+LETTERS = {"en": ["A", "B", "C", "D"], "ar": ["أ", "ب", "ج", "د"]}
+
+T = {
+    "en": {
+        "ready": "Ready for the quiz? Let's go 🎯",
+        "q": "Question",
+        "correct": "✅ Correct!",
+        "wrong": "❌ Wrong. Correct answer: {r}",
+        "done": "Done! Your score: {s}/{t}",
+        "missed": "\nYou missed {n} question(s).",
+        "retry": "🔁 Retry missed questions",
+        "perfect": "\nPerfect! 🌟 Send a new page when you're ready.",
+    },
+    "ar": {
+        "ready": "جاهز للاختبار؟ يلا نبدأ 🎯",
+        "q": "سؤال",
+        "correct": "✅ صح!",
+        "wrong": "❌ غلط. الجواب الصحيح: {r}",
+        "done": "خلصنا! نتيجتك: {s}/{t}",
+        "missed": "\nغلطت في {n} سؤال.",
+        "retry": "🔁 أعد الأسئلة الغلط",
+        "perfect": "\nممتاز! 🌟 ابعت صفحة جديدة لما تكون جاهز.",
+    },
+}
 
 SYSTEM = """You are an expert university tutor. The student sends you a page (image, PDF, or text).
 
-PART 1 - EXPLANATION (bilingual and comprehensive):
-- Cover EVERYTHING on the page: every concept, definition, formula, term, example, table, and figure. Do not skip any detail.
-- Organize it into short numbered sections. In each section, first explain in clear English, then explain the same idea in simple Arabic (Jordanian-friendly Modern Arabic), keeping technical terms in English.
-- Add a short real-world example or intuition where it helps. Explain formulas step by step and say what each symbol means.
-- End with a list called "Key Takeaways / أهم النقاط".
-- Plain text only: no markdown symbols (no *, #, or backticks). Use numbering, line breaks, and a few emojis for headings.
+STEP 0 - DETECT THE LANGUAGE:
+Look at the main content of the page itself (ignore the student's captions or instructions). If the page is mainly Arabic, set "language" to "ar". Otherwise set "language" to "en".
 
-PART 2 - QUESTIONS (English only):
-- Write exactly NUM_Q multiple-choice questions in English only, covering ALL parts of the page, from easy to challenging, testing understanding and application, not just memorization.
-- Each question has 4 options in English, exactly one correct. Vary the position of the correct answer.
-- "why" is a clear English explanation of why the answer is correct and briefly why the common wrong choices are wrong.
+IF language is "en" (English page):
+- EXPLANATION: cover EVERYTHING on the page: every concept, definition, formula, term, example, table, and figure. Do not skip any detail. Organize into short numbered sections. In each section, first explain clearly in English, then explain the same idea in simple Arabic (Jordanian-friendly Modern Arabic), keeping technical terms in English.
+- QUESTIONS: English only (question, options, and explanation).
+- End the explanation with a list called "Key Takeaways / أهم النقاط".
+
+IF language is "ar" (Arabic page):
+- EXPLANATION: Arabic only, in clear simple Arabic. Cover EVERYTHING on the page: every concept, definition, formula, term, example, table, and figure. Do not skip any detail. Organize into short numbered sections. You may put the English technical term in parentheses on first mention.
+- QUESTIONS: Arabic only (question, options, and explanation).
+- End the explanation with a list called "أهم النقاط".
+
+COMMON RULES:
+- Add a short real-world example or intuition where it helps. Explain formulas step by step and say what each symbol means.
+- Plain text only: no markdown symbols (no *, #, or backticks). Use numbering, line breaks, and a few emojis for headings.
+- Write exactly NUM_Q multiple-choice questions covering ALL parts of the page, from easy to challenging, testing understanding and application, not just memorization.
+- Each question has 4 options, exactly one correct. Vary the position of the correct answer.
+- "why" explains clearly why the answer is correct and briefly why the common wrong choices are wrong.
 
 Return ONLY valid JSON, no code fences:
-{"explanation": "...", "questions": [{"q": "...", "options": ["...", "...", "...", "..."], "answer": 0, "why": "..."}]}
+{"language": "en", "explanation": "...", "questions": [{"q": "...", "options": ["...", "...", "...", "..."], "answer": 0, "why": "..."}]}
 "answer" is the zero-based index of the correct option. Use \\n for line breaks inside JSON strings."""
 SYSTEM = SYSTEM.replace("NUM_Q", str(NUM_Q))
 
@@ -64,6 +96,7 @@ def parse_json(text: str) -> dict:
             q.setdefault("why", "")
             good.append(q)
     data["questions"] = good
+    data["language"] = "ar" if data.get("language") == "ar" else "en"
     return data
 
 
@@ -116,7 +149,9 @@ async def on_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if m.caption:
         parts.append(types.Part.from_text(text=m.caption))
     parts.append(
-        types.Part.from_text(text="Explain this content comprehensively and give me the questions.")
+        types.Part.from_text(
+            text="Detect the page language, explain this content comprehensively, and give me the questions."
+        )
     )
 
     wait = await m.reply_text("⏳ عم أقرأ الصفحة... / Reading the page...")
@@ -137,11 +172,12 @@ async def on_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await wait.delete()
+    lang = data["language"]
     for part in chunks(data.get("explanation", "")):
         await m.reply_text(part)
 
     if not data["questions"]:
-        await m.reply_text("ما قدرت أطلع أسئلة من هالصفحة.")
+        await m.reply_text("ما قدرت أطلع أسئلة من هالصفحة. / Couldn't generate questions.")
         return
 
     s = {
@@ -150,21 +186,24 @@ async def on_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "pos": 0,
         "score": 0,
         "wrong": [],
+        "lang": lang,
     }
     sessions[uid] = s
-    await m.reply_text("Ready for the quiz? Let's go 🎯")
+    await m.reply_text(T[lang]["ready"])
     await send_question(m.chat_id, ctx, s)
 
 
 async def send_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, s: dict):
+    lang = s["lang"]
+    letters = LETTERS[lang]
     q = s["questions"][s["order"][s["pos"]]]
-    text = f"Question {s['pos'] + 1}/{len(s['order'])}\n\n{q['q']}\n\n" + "\n".join(
-        f"{LETTERS[i]}) {o}" for i, o in enumerate(q["options"])
+    text = f"{T[lang]['q']} {s['pos'] + 1}/{len(s['order'])}\n\n{q['q']}\n\n" + "\n".join(
+        f"{letters[i]}) {o}" for i, o in enumerate(q["options"])
     )
     kb = InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(LETTERS[i], callback_data=f"a:{s['pos']}:{i}")
+                InlineKeyboardButton(letters[i], callback_data=f"a:{s['pos']}:{i}")
                 for i in range(len(q["options"]))
             ]
         ]
@@ -184,6 +223,9 @@ async def on_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if pos != s["pos"]:
         return
 
+    lang = s["lang"]
+    t = T[lang]
+    letters = LETTERS[lang]
     qi = s["order"][pos]
     q = s["questions"][qi]
     ok = choice == q["answer"]
@@ -192,8 +234,8 @@ async def on_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         s["wrong"].append(qi)
 
-    right = f"{LETTERS[q['answer']]}) {q['options'][q['answer']]}"
-    result = "✅ Correct!" if ok else f"❌ Wrong. Correct answer: {right}"
+    right = f"{letters[q['answer']]}) {q['options'][q['answer']]}"
+    result = t["correct"] if ok else t["wrong"].format(r=right)
     await cq.edit_message_text(f"{cq.message.text}\n\n{result}\n{q['why']}")
 
     s["pos"] += 1
@@ -202,15 +244,15 @@ async def on_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     total = len(s["order"])
-    msg = f"Done! Your score: {s['score']}/{total}"
+    msg = t["done"].format(s=s["score"], t=total)
     kb = None
     if s["wrong"]:
-        msg += f"\nYou missed {len(s['wrong'])} question(s)."
+        msg += t["missed"].format(n=len(s["wrong"]))
         kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔁 Retry missed questions", callback_data="retry")]]
+            [[InlineKeyboardButton(t["retry"], callback_data="retry")]]
         )
     else:
-        msg += "\nPerfect! 🌟 Send a new page when you're ready."
+        msg += t["perfect"]
     await ctx.bot.send_message(cq.message.chat_id, msg, reply_markup=kb)
 
 
