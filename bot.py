@@ -14,7 +14,6 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
-    TypeHandler,
     filters,
 )
 
@@ -47,7 +46,6 @@ CREDIT = (
 T = {
     "en": {
         "menu": "What next? 👇",
-        "b_solve": "✅ Solve the questions",
         "b_quiz": "🎯 Start quiz",
         "b_sum": "📋 Summary",
         "b_cards": "🃏 Flashcards",
@@ -78,7 +76,6 @@ T = {
     },
     "ar": {
         "menu": "شو بدك تعمل هسا؟ 👇",
-        "b_solve": "✅ حل الأسئلة",
         "b_quiz": "🎯 ابدأ الاختبار",
         "b_sum": "📋 ملخص",
         "b_cards": "🃏 بطاقات مراجعة",
@@ -138,17 +135,6 @@ Return ONLY valid JSON, no code fences:
 "answer" is the zero-based index of the correct option. Use \\n for line breaks inside JSON strings."""
 SYSTEM = SYSTEM.replace("NUM_Q", str(NUM_Q))
 
-REQUEST_SYS = """You are an expert, careful tutor. The student sends a page (image, PDF, or text) together with an instruction. Do exactly what the instruction asks about the page: solve, explain, translate, summarize, check answers, and so on.
-
-When the task is to solve:
-- If the instruction names specific questions (for example "solve question 3"), solve ONLY those. Otherwise solve every question and problem on the page, in order.
-- For each one: restate it in one short line, then show numbered step-by-step working with all calculations and units, double-check the arithmetic, and end with a clear line "Answer: ..." (or "الجواب: ..." in Arabic).
-- For multiple-choice questions: state the correct option and explain why. For written or theory questions: give a complete model answer.
-- If part of the page is unreadable or ambiguous, say clearly what you could not read and state your assumption instead of guessing silently.
-
-Language: reply in the language of the student's instruction (Arabic instruction: Arabic answer, keeping technical terms in English; English instruction: English answer).
-Plain text only: no markdown symbols (no *, #, or backticks) and NEVER LaTeX or dollar signs. Write math in Unicode: x², √, π, ×, ÷, ≤, ≥, ∫, Σ, x₁. Use numbering, line breaks and a few emojis for headings."""
-
 QUESTIONS_SYS = """You write practice questions from the given page. Return ONLY valid JSON, no code fences:
 {"questions": [{"q": "...", "options": ["...", "...", "...", "..."], "answer": 0, "why": "...", "hint": "..."}]}
 Write exactly NUM_Q multiple-choice questions, 4 options each, exactly one correct, "answer" is the zero-based index, vary its position. "hint" nudges without revealing. For math pages: new numeric problems similar to the page with different numbers, "why" is the complete step-by-step solution, verify all arithmetic, wrong options are typical mistakes. For theory pages: test understanding and application. Plain text only, Unicode math (x², √, π, ×, ÷), NEVER LaTeX. Follow the language requested in the instruction. Use \\n for line breaks inside JSON strings."""
@@ -162,7 +148,6 @@ Each front and back is ONE short line of plain text (no line breaks, no markdown
 
 ASK_SYS = """You are a friendly, knowledgeable tutor and assistant. The student asks you a question.
 - If a page (image, PDF, or text) is provided, use it as context when the question relates to it. If the question is not about the page, just answer it from your general knowledge.
-- If the student asks you to solve, answer, or check questions on the page (for example "solve question 2"), do exactly that: solve step by step and end with the final answer.
 - If there is a previous conversation, use it to understand follow-up questions.
 - Reply in the same language as the student's question (Arabic question: Arabic answer; English question: English answer).
 - For math, physics, or any calculation: show clear step-by-step work, double-check the arithmetic, and state the final answer.
@@ -172,44 +157,6 @@ ASK_SYS = """You are a friendly, knowledgeable tutor and assistant. The student 
 
 def allowed(uid: int) -> bool:
     return not ALLOWED or uid in ALLOWED
-
-
-_ids = [int(x) for x in os.getenv("ALLOWED_IDS", "").split(",") if x.strip()]
-ADMIN_ID = int(os.getenv("ADMIN_ID") or (_ids[0] if _ids else 0))
-seen: dict[int, dict] = {}
-
-
-def who(u) -> str:
-    name = u.full_name or "?"
-    tag = f"@{u.username}" if u.username else "(no username)"
-    return f"{name} {tag} | id: {u.id}"
-
-
-async def track(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    u = update.effective_user
-    if not u or not update.message:
-        return
-    rec = seen.get(u.id)
-    if rec:
-        rec["count"] += 1
-        return
-    seen[u.id] = {"info": who(u), "count": 1}
-    if ADMIN_ID and u.id != ADMIN_ID:
-        status = "✅ allowed" if allowed(u.id) else "⛔ blocked (not in ALLOWED_IDS)"
-        try:
-            await ctx.bot.send_message(ADMIN_ID, f"🆕 New user\n{who(u)}\n{status}")
-        except Exception:
-            log.exception("admin notify failed")
-
-
-async def users_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ADMIN_ID or update.effective_user.id != ADMIN_ID:
-        return
-    if not seen:
-        await update.message.reply_text("No users yet since last restart.")
-        return
-    lines = [f"{i}) {r['info']} — {r['count']} msgs" for i, r in enumerate(seen.values(), 1)]
-    await update.message.reply_text("\n".join(lines)[:4000])
 
 
 def load_json(text: str) -> dict:
@@ -247,43 +194,16 @@ def one_line(x) -> str:
     return " ".join(str(x).split())
 
 
-def has_arabic(text: str) -> bool:
-    return any("\u0600" <= ch <= "\u06ff" for ch in text)
-
-
 def text_note(lang: str) -> str:
     if lang == "ar":
         return "Write in Arabic only."
     return "Write in English, then add a short Arabic version of each part."
 
 
-def solve_note(lang: str) -> str:
-    if lang == "ar":
-        return "Reply in Arabic (keep technical terms in English)."
-    return "Reply in English, then add a brief Arabic summary of the final answers."
-
-
 def quiz_note(lang: str) -> str:
     if lang == "ar":
         return "Questions, options, hints and explanations in Arabic only."
     return "Questions, options, hints and explanations in English only."
-
-
-def new_session(parts, lang: str, kind: str, questions: list) -> dict:
-    return {
-        "parts": parts,
-        "lang": lang,
-        "kind": kind,
-        "questions": questions,
-        "order": [],
-        "pos": 0,
-        "score": 0,
-        "wrong": [],
-        "marks": [],
-        "streak": 0,
-        "best": 0,
-        "hinted": set(),
-    }
 
 
 async def call_model(parts, instruction, system, as_json=True, max_tokens=16000) -> str:
@@ -314,23 +234,10 @@ def fail_text(e: Exception) -> str:
     return LIMIT_MSG if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else ERR_MSG
 
 
-async def make_questions(s: dict, harder: bool = False) -> list[dict]:
-    lang = s["lang"]
-    prev = "\n".join(q["q"] for q in s["questions"])
-    kind = s["kind"] if s["kind"] in ("math", "theory") else "detect from the page (math problems or theory)"
-    flavor = "NEW and somewhat harder " if harder else ""
-    instr = f"Write {NUM_Q} {flavor}questions. Content kind: {kind}. {quiz_note(lang)}"
-    if prev:
-        instr += f" Do not repeat these questions:\n{prev}"
-    raw = await call_model(s["parts"], instr, QUESTIONS_SYS, True, 16000)
-    return clean_questions(load_json(raw).get("questions"))
-
-
 def menu_kb(lang: str) -> InlineKeyboardMarkup:
     t = T[lang]
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(t["b_solve"], callback_data="m:solve")],
             [InlineKeyboardButton(t["b_quiz"], callback_data="m:quiz")],
             [
                 InlineKeyboardButton(t["b_sum"], callback_data="m:sum"),
@@ -367,10 +274,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً! 👋\n"
         "📄 ابعتلي صفحة (صورة أو PDF أو نص طويل) أو مسائل رياضيات، وراح أشرحها وأحلها وأختبرك عليها.\n"
-        "✍️ اكتب تعليق مع الصورة (مثلاً: حل السؤال 2) وبنفذ طلبك بالضبط.\n"
         "💬 أو اكتب أي سؤال وبجاوبك مباشرة.\n\n"
         "Send me a page (photo, PDF, long text) or math problems and I'll explain, solve, and quiz you.\n"
-        "Add a caption to the photo (e.g. \"solve question 2\") and I'll do exactly that.\n"
         "Or just type any question and I'll answer it.\n\n"
         "/new = new page   /about = credits\n\n"
         + CREDIT
@@ -412,7 +317,7 @@ async def answer_question(m, ctx: ContextTypes.DEFAULT_TYPE):
                 + "\n\n"
             )
         text = await call_model(
-            parts, f"{convo}Student question: {m.text}", ASK_SYS, False, 8000
+            parts, f"{convo}Student question: {m.text}", ASK_SYS, False, 6000
         )
         text = text.strip() or "..."
         hist.append((m.text, text))
@@ -422,33 +327,6 @@ async def answer_question(m, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log.exception("ask failed")
         await m.reply_text(fail_text(e))
-    finally:
-        busy.discard(uid)
-
-
-async def handle_request(m, ctx: ContextTypes.DEFAULT_TYPE, parts: list, caption: str):
-    uid = m.from_user.id
-    lang = "ar" if has_arabic(caption) else "en"
-    wait = await m.reply_text("⏳ عم أشتغل على طلبك... / Working on it...")
-    try:
-        await ctx.bot.send_chat_action(m.chat_id, "typing")
-        text = await call_model(
-            parts, f"Student instruction: {caption}", REQUEST_SYS, False, 16000
-        )
-        text = text.strip() or "..."
-    except Exception as e:
-        log.exception("request failed")
-        await wait.edit_text(fail_text(e))
-        busy.discard(uid)
-        return
-
-    try:
-        await wait.delete()
-        for part in chunks(text):
-            await m.reply_text(part)
-        history.pop(uid, None)
-        sessions[uid] = new_session(parts, lang, "auto", [])
-        await send_menu(m.chat_id, ctx, lang)
     finally:
         busy.discard(uid)
 
@@ -488,14 +366,10 @@ async def on_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await m.reply_text("ابعت صورة أو PDF أو نص.")
         return
 
-    caption = (m.caption or "").strip()
+    if m.caption:
+        parts.append(types.Part.from_text(text=m.caption))
+
     busy.add(uid)
-
-    # A caption is an instruction: do exactly what it says (e.g. "solve question 3").
-    if caption:
-        await handle_request(m, ctx, parts, caption)
-        return
-
     wait = await m.reply_text("⏳ عم أقرأ الصفحة... / Reading the page...")
     try:
         await ctx.bot.send_chat_action(m.chat_id, "typing")
@@ -525,7 +399,20 @@ async def on_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await m.reply_text(part)
 
         history.pop(uid, None)
-        sessions[uid] = new_session(parts, lang, kind, questions)
+        sessions[uid] = {
+            "parts": parts,
+            "lang": lang,
+            "kind": kind,
+            "questions": questions,
+            "order": [],
+            "pos": 0,
+            "score": 0,
+            "wrong": [],
+            "marks": [],
+            "streak": 0,
+            "best": 0,
+            "hinted": set(),
+        }
         await send_menu(m.chat_id, ctx, lang)
     finally:
         busy.discard(uid)
@@ -667,11 +554,11 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     lang = s["lang"]
     t = T[lang]
 
+    if action == "quiz":
+        await start_quiz(chat, ctx, s)
+        return
     if action == "ask":
         await ctx.bot.send_message(chat, t["ask_prompt"])
-        return
-    if action == "quiz" and s["questions"]:
-        await start_quiz(chat, ctx, s)
         return
 
     if uid in busy:
@@ -679,19 +566,7 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     busy.add(uid)
     try:
         await ctx.bot.send_chat_action(chat, "typing")
-        if action == "solve":
-            text = await call_model(
-                s["parts"],
-                f"Solve every question and problem on the page now. {solve_note(lang)}",
-                REQUEST_SYS,
-                False,
-                16000,
-            )
-            for part in chunks(text.strip() or "..."):
-                await ctx.bot.send_message(chat, part)
-            await send_menu(chat, ctx, lang)
-
-        elif action == "sum":
+        if action == "sum":
             text = await call_model(
                 s["parts"],
                 f"Write the cheat sheet now. {text_note(lang)}",
@@ -722,8 +597,19 @@ async def on_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.send_message(chat, part, parse_mode="HTML")
             await send_menu(chat, ctx, lang)
 
-        elif action in ("quiz", "more"):
-            new_q = await make_questions(s, harder=(action == "more"))
+        elif action == "more":
+            prev = "\n".join(q["q"] for q in s["questions"])
+            raw = await call_model(
+                s["parts"],
+                (
+                    f"Write {NUM_Q} NEW and somewhat harder questions. Content kind: {s['kind']}. "
+                    f"{quiz_note(lang)} Do not repeat these questions:\n{prev}"
+                ),
+                QUESTIONS_SYS,
+                True,
+                16000,
+            )
+            new_q = clean_questions(load_json(raw).get("questions"))
             if not new_q:
                 await ctx.bot.send_message(chat, t["noq"])
             else:
@@ -745,8 +631,6 @@ async def main():
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("new", new_cmd))
     app.add_handler(CommandHandler("about", about_cmd))
-    app.add_handler(CommandHandler("users", users_cmd))
-    app.add_handler(TypeHandler(Update, track), group=-1)
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^a:"))
     app.add_handler(CallbackQueryHandler(on_hint, pattern=r"^h:"))
