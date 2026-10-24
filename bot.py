@@ -36,6 +36,13 @@ LETTERS = {"en": ["A", "B", "C", "D"], "ar": ["أ", "ب", "ج", "د"]}
 LIMIT_MSG = "وصلنا للحد المجاني لجيمناي، جرّب بعد شوي ⏳\nFree limit reached, please try again in a bit."
 ERR_MSG = "صار خطأ، جرّب مرة ثانية.\nSomething went wrong, please try again."
 
+CREDIT = (
+    "👨‍💻 تم تطوير البوت بواسطة @mbxll0\n"
+    "🎓 صمّم البوت: عمر\n\n"
+    "Developed by @mbxll0\n"
+    "Designed by Omar"
+)
+
 T = {
     "en": {
         "menu": "What next? 👇",
@@ -270,8 +277,15 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "💬 أو اكتب أي سؤال وبجاوبك مباشرة.\n\n"
         "Send me a page (photo, PDF, long text) or math problems and I'll explain, solve, and quiz you.\n"
         "Or just type any question and I'll answer it.\n\n"
-        "/new = new page"
+        "/new = new page   /about = credits\n\n"
+        + CREDIT
     )
+
+
+async def about_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update.effective_user.id):
+        return
+    await update.message.reply_text(CREDIT)
 
 
 async def new_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -616,6 +630,7 @@ async def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler(["start", "help"], start))
     app.add_handler(CommandHandler("new", new_cmd))
+    app.add_handler(CommandHandler("about", about_cmd))
     app.add_handler(CallbackQueryHandler(on_menu, pattern=r"^m:"))
     app.add_handler(CallbackQueryHandler(on_answer, pattern=r"^a:"))
     app.add_handler(CallbackQueryHandler(on_hint, pattern=r"^h:"))
